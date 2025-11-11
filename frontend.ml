@@ -84,6 +84,12 @@ module Ctxt = struct
   
 end
 
+let rec ctxt_num_types (c:Ctxt.t) (t:Ll.ty) : int =
+  begin match c with
+   | [] -> 0
+   | (_, (t, _))::xs -> 1 + (ctxt_num_types xs t)
+   | _ -> ctxt_num_types c t
+  end
 (* compiling OAT types ------------------------------------------------------ *)
 
 (* The mapping of source types onto LLVMlite is straightforward. Booleans and ints
@@ -303,9 +309,52 @@ let oat_alloc_array (t:Ast.ty) (size:Ll.operand) : Ll.ty * operand * stream =
      (CArr) and the (NewArr) expressions
 
 *)
-
+  
+let ast_to_ll_binop (ast_op : Ast.binop) : Ll.bop =
+  begin match ast_op with
+  | Add -> Ll.Add
+  | Sub -> Ll.Sub
+  | Mul -> Ll.Mul
+  | Eq -> failwith "ast_to_ll_binop case not implemented"
+  | Neq -> failwith "ast_to_ll_binop neq not implemented"
+  | Lt -> failwith "ast_to_ll_binop case not implemented"
+  | Lte -> failwith "ast_to_ll_binop case not implemented"
+  | Gt -> failwith "ast_to_ll_binop case not implemented"
+  | Gte -> failwith "ast_to_ll_binop case not implemented"
+  | And -> Ll.And
+  | Or -> Ll.Or
+  | IAnd -> failwith "ast_to_ll_binop case not implemented"
+  | IOr -> failwith "ast_to_ll_binop case not implemented"
+  | Shl -> Ll.Shl
+  | Shr -> Ll.Lshr
+  | Sar -> Ll.Ashr
+  end
 let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty * Ll.operand * stream =
-  failwith "cmp_exp not implemented"
+  let rem_exp = exp.elt in
+  begin match rem_exp with
+    | CInt i -> let arg_name = gensym "int" in
+                let cnew = (Ctxt.add c arg_name (cmp_ty TInt, Id arg_name)) in
+                c = cnew;
+                ((cmp_ty TInt), Ll.Id arg_name, [I (arg_name,  Ll.Binop (Ll.Add ,(cmp_ty TInt), Const(i), Const(0L)))])
+    | CBool b -> let v = if(b) then 1L else 0L in
+                 let arg_name = gensym "bool" in
+                 let cnew = (Ctxt.add c arg_name (cmp_ty TBool, Id arg_name)) in
+                 ((cmp_ty TBool), Ll.Id arg_name, [I (arg_name, Ll.Binop(Ll.Or, (cmp_ty TBool), Const(v), Const(0L) ))])
+    | CStr s -> failwith "cmp_exp string case not implemented"
+    | CNull r -> failwith "cmp_exp null case not implemented"
+    | Bop(_) -> cmp_exp_bop c rem_exp 
+    | _ -> failwith "cmp_exp case unimplemented"
+  end
+and cmp_exp_bop (c:Ctxt.t) (exp:Ast.exp) : Ll.ty * Ll.operand * stream =
+  let Ast.Bop(op, exp1_node, exp2_node) = exp in
+  let (exp1, exp2) = (exp1_node.elt, exp2_node.elt) in
+  let (exp1_ty, exp1_oper, exp1_stream) = cmp_exp c exp1_node in
+  let (exp2_ty, exp2_oper, exp2_stream) = cmp_exp c exp2_node in
+  let arg_name = gensym "bop" in
+  let arg_type = exp1_ty in
+  Ctxt.add c arg_name (exp1_ty, (Ll.Id arg_name));
+  let ll_bop = ast_to_ll_binop op in
+  (exp1_ty, (Ll.Id arg_name), exp1_stream@exp2_stream@[I (arg_name, Ll.Binop(ll_bop, exp1_ty, exp1_oper, exp2_oper))])
 
 (* Compile a statement in context c with return typ rt. Return a new context, 
    possibly extended with new local bindings, and the instruction stream
@@ -333,9 +382,31 @@ let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty * Ll.operand * stream =
      pointer, you just need to store to it!
 
  *)
+(*  let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty * Ll.operand * stream = *)
+
+let cmp_ret (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
+  begin match stmt with
+  | Ret(None) -> (c, [T(Ret(Void,None))])
+  | Ret(Some(exp_node)) -> let exp = exp_node.elt in
+          begin match exp with
+          | CBool b -> let v = if(b) then 1L else 0L in
+               (c, [T(Ret(I1, Some(Ll.Const(v))))])
+          | CInt i -> (c, [T(Ret(I64, Some(Ll.Const(i))))])
+          | CNull n -> failwith "cmp_ret null not implemented"
+          | CStr s -> failwith "cmp_ret string not implemented"
+          | Bop(_) -> let (ret_ty, ret_oper, ret_stream) = cmp_exp_bop c exp in
+                      (c, ret_stream@[T (Ll.Ret(rt, Some(ret_oper)))])
+          | _ -> failwith "cmp_ret case not implemented"
+          end
+  end
+  
 
 let rec cmp_stmt (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt node) : Ctxt.t * stream =
-  failwith "cmp_stmt not implemented"
+  let rem_stmt = stmt.elt in
+  begin match rem_stmt with
+    | Ret(_) -> cmp_ret c rt rem_stmt
+    |_ -> failwith "cmp_stmt case not implemented"
+  end
 
 (* Compile a series of statements *)
 and cmp_block (c:Ctxt.t) (rt:Ll.ty) (stmts:Ast.block) : Ctxt.t * stream =
@@ -371,11 +442,13 @@ let glb_ctxt_fold (c:Ctxt.t) (d:decl) : Ctxt.t =
   begin match d with
     | Ast.Gvdecl {elt = {name = g_name; init = g_exp_node} } ->
       let g_exp = g_exp_node.elt in
-      match g_exp with
-        | CNull rt -> (g_name, ((cmp_rty rt), Ll.Null))::c
-        | CBool b -> (g_name, (Ll.I1, if(b) then Ll.Const(1L) else Ll.Const(0L)))::c
-        | CInt i -> (g_name, (Ll.I64, Const(i)))::c
-        | _ -> failwith "g_exp case not implemented"
+      (match g_exp with
+        | CNull rt -> Ctxt.add c g_name (cmp_rty rt, Gid g_name)
+        | CBool b -> Ctxt.add c g_name (cmp_ty Ast.TBool, Gid g_name)
+        | CInt i -> Ctxt.add c g_name (cmp_ty Ast.TInt, Gid g_name)
+        | CStr s -> Ctxt.add c g_name (cmp_rty Ast.RString, Gid g_name)
+        | CArr (t,e) -> Ctxt.add c g_name (cmp_rty (Ast.RArray t), Gid g_name)
+        | _ -> failwith "g_exp case not implemented")
 
     | _ -> c
   end
@@ -394,9 +467,58 @@ let cmp_global_ctxt (c:Ctxt.t) (p:Ast.prog) : Ctxt.t =
    4. Compile the body of the function using cmp_block
    5. Use cfg_of_stream to produce a LLVMlite cfg from 
  *)
+let alloca_args_fold (c:Ctxt.t) (acc : ((Ll.uid * Ll.insn) list) list) (arg : (Ast.ty * Ast.id)) : ((Ll.uid * Ll.insn) list) list =
+  match arg with
+    | (TBool, arg_id) -> 
+                          let alloca_id = (arg_id^".alloca") in
+                          let insn_alloca = (alloca_id, Alloca(Ptr(cmp_ty TBool))) in
+                          let insn_transfer = (arg_id, Load(Ptr(cmp_ty TBool), Id(alloca_id)))in
+                          [insn_alloca; insn_transfer]::acc
+    | (TInt, arg_id) -> 
+                          let alloca_id = (arg_id^".alloca") in
+                          let insn_alloca = (alloca_id, Alloca(Ptr(cmp_ty TInt))) in
+                          let insn_transfer = (arg_id, Load(Ptr(cmp_ty TInt), Id(alloca_id)))in
+                          [insn_alloca; insn_transfer]::acc
+    | _ -> failwith "alloca_args_fold case unimplemented"                                           
 
+  
+
+let alloca_args (c:Ctxt.t) (args : (Ast.ty * Ast.id) list) : (Ll.uid * Ll.insn) list =
+  List.concat(List.rev(List.fold_left (alloca_args_fold c) [] args))
+
+let args_types_fold (c:Ctxt.t) (acc : Ll.ty list) (arg : (Ast.ty * Ast.id)) : Ll.ty list =
+  begin match arg with
+  | (t, _) -> (cmp_ty t)::acc
+  | _ -> failwith "some args_types_fold case unimplemented, should not be the case"
+  end
+let args_types (c:Ctxt.t) (args : (Ast.ty * Ast.id) list) : (Ll.ty list) =
+  List.rev (List.fold_left (args_types_fold c) [] args)
+
+let args_uids_fold (c:Ctxt.t) (acc : Ll.uid list) (arg : (Ast.ty * Ast.id)) : Ll.uid list =
+  begin match arg with
+  | (_, name) -> (name)::acc
+  | _ -> failwith "some args_uids_fold case unimplemented, should not be the case"
+  end
+  
+let args_uids (c:Ctxt.t) (args : (Ast.ty * Ast.id) list) : (Ll.uid list) =
+  List.rev (List.fold_left (args_uids_fold c) [] args)
+
+let rec remove_nodes (l:'a node list) : ('a) list =
+  begin match l with
+  | [] -> []
+  | x::xs -> (x.elt)::(remove_nodes xs)
+  end
+(* and cmp_block (c:Ctxt.t) (rt:Ll.ty) (stmts:Ast.block) : Ctxt.t * stream = *)
+(* let cfg_of_stream (code:stream) : Ll.cfg * (Ll.gid * Ll.gdecl) list  = *)
 let cmp_fdecl (c:Ctxt.t) (f:Ast.fdecl node) : Ll.fdecl * (Ll.gid * Ll.gdecl) list =
-  failwith "cmp_fdecl not implemented"
+  let {frtyp=frtyp; fname=fname; args=args; body=body} = f.elt in
+  let fty_list = args_types c args in
+  let ret_fty = (fty_list, (cmp_ret_ty frtyp)) in
+  let ret_f_param = args_uids c args in
+  let (cmp_block_ctxt, cmp_block_stream) = cmp_block c (cmp_ret_ty frtyp) body in
+  let (ret_cfg, ret_gdecls) = cfg_of_stream cmp_block_stream in
+  let ret_fdecl = {f_ty = ret_fty; f_param=ret_f_param; f_cfg=ret_cfg} in
+  (ret_fdecl, ret_gdecls)
 
 (* Compile a global initializer, returning the resulting LLVMlite global
    declaration, and a list of additional global declarations.
@@ -411,8 +533,20 @@ let cmp_fdecl (c:Ctxt.t) (f:Ast.fdecl node) : Ll.fdecl * (Ll.gid * Ll.gdecl) lis
 *)
 
 let rec cmp_gexp c (e:Ast.exp node) : Ll.gdecl * (Ll.gid * Ll.gdecl) list =
-  failwith "cmp_gexp not implemented"
-
+  let {elt=g_exp; loc=g_exp_loc} = e in
+  begin match g_exp with
+    | CBool b ->
+                let v = (if (b) then 1L else 0L) in
+                let g_dec = ((Ptr (cmp_ty TBool)),(GInt v)) in 
+                (g_dec, [])
+    | CInt i ->
+                let g_dec = ((Ptr (cmp_ty TInt)),(GInt i)) in 
+                (g_dec, [])
+    | CStr s ->
+                let g_dec = (Ptr (cmp_rty RString),(GString s)) in 
+                (g_dec, [])
+    | _ -> failwith "g_exp case not implemented"            
+  end
 (* Oat internals function context ------------------------------------------- *)
 let internals = [
     "oat_alloc_array",         Ll.Fun ([I64], Ptr I64)
