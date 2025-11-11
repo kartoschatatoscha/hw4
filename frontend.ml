@@ -331,7 +331,7 @@ let ast_to_ll_binop (ast_op : Ast.binop) : Ll.bop =
   | Sar -> Ll.Ashr
   end
 
-let rec exp_type (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty =
+let rec exp_type (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty = (* only to be used for args*)
   begin match exp.elt with
   | CNull(_) -> failwith "exp_type of CNull not implemented"
   | CBool(_) -> Ll.I1
@@ -339,7 +339,9 @@ let rec exp_type (c:Ctxt.t) (exp:Ast.exp node) : Ll.ty =
   | CStr(_) -> Ll.Ptr(Ll.I8)
   | CArr(t, _) -> Ll.Ptr(cmp_ty t)
   | NewArr(t,_) -> Ll.Ptr(cmp_ty t)
-  | Id(id) -> let (ret_ty, ret_oper) = Ctxt.lookup id c in ret_ty
+  | Id(id) -> let (Ll.Ptr(ret_ty), ret_oper) = Ctxt.lookup id c in ret_ty
+  | Bop(_, exp1_node, exp2_node) -> exp_type c exp1_node
+  | Uop(_, exp_node) -> exp_type c exp_node
   | _ -> failwith "cmp_exp_type case unimplemented"
   end
 
@@ -359,6 +361,14 @@ let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ctxt.t * Ll.ty * Ll.operand * st
     | CNull r -> failwith "cmp_exp null case not implemented"
     | Bop(_) -> cmp_exp_bop c rem_exp 
     | Uop(_) -> cmp_exp_uop c rem_exp
+    | Id(id) -> let (var_ty_ptr, var_ptr_oper) = Ctxt.lookup id c in
+                let Ll.Ptr(var_ty) = var_ty_ptr in
+                let var_val_id = gensym "id" in
+                let c1 = Ctxt.add c var_val_id (var_ty, Ll.Id(var_val_id)) in
+                let insn = I(var_val_id, Load(Ll.Ptr(var_ty), var_ptr_oper)) in
+                (c1, var_ty, Ll.Id(var_val_id), [insn])
+    | Index(_) -> failwith "cmp_exp index not implemented"
+    | Call(_) -> failwith "cmp_exp call not implemented"
     | _ -> failwith "cmp_exp case unimplemented"
   end
 and cmp_exp_bop (c:Ctxt.t) (exp:Ast.exp) : Ctxt.t * Ll.ty * Ll.operand * stream =
@@ -424,8 +434,8 @@ let cmp_ret (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
           | Id(ret_id) -> let (ret_ty_ptr, ret_oper) = Ctxt.lookup ret_id c in
                           let Ptr(ret_ty) = ret_ty_ptr in
                           let val_name = ret_id^".val" in
-                          c = Ctxt.add c val_name (ret_ty, Ll.Id(val_name));
-                          (c, [I (val_name, Ll.Load(ret_ty_ptr, ret_oper)); T(Ll.Ret(ret_ty, Some(Ll.Id(val_name))))])
+                          let c1 = Ctxt.add c val_name (ret_ty, Ll.Id(val_name)) in
+                          (c1, [I (val_name, Ll.Load(ret_ty_ptr, ret_oper)); T(Ll.Ret(ret_ty, Some(Ll.Id(val_name))))])
           | _ -> failwith "cmp_ret case not implemented"
           end
   end
@@ -435,8 +445,8 @@ let cmp_assn (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
   let (c1, exp_ty, exp_oper, exp_stream) = cmp_exp c exp_node in
   let var = var_node.elt in
   begin match var with
-    | Id(id) -> let (exp_ty, exp_oper) = Ctxt.lookup id c in
-                (c1, exp_stream@[I ("", Ll.Store(exp_ty, exp_oper, Ll.Id(id)))])
+    | Id(id) -> let (var_ty, var_oper) = Ctxt.lookup id c1 in
+                (c1, exp_stream@[I ("", Ll.Store(exp_ty, exp_oper, var_oper))])
     | _ -> failwith "cmp_assn case unimplemented"           
   end
 let cmp_decl (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
@@ -444,7 +454,11 @@ let cmp_decl (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
   let (c1, exp_ty, exp_oper, exp_stream) = cmp_exp c exp_node in
   let (var_ptr_ty, var_ptr_oper) = Ctxt.lookup var_id c1 in
   (c1, exp_stream@[I("", Ll.Store(exp_ty, exp_oper, var_ptr_oper))])
+(* let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ctxt.t * Ll.ty * Ll.operand * stream = *)
+(* cmp_block (c:Ctxt.t) (rt:Ll.ty) (stmts:Ast.block) : Ctxt.t * stream = *)
 
+
+  
 let rec cmp_stmt (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt node) : Ctxt.t * stream =
   let rem_stmt = stmt.elt in
   begin match rem_stmt with
@@ -454,7 +468,14 @@ let rec cmp_stmt (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt node) : Ctxt.t * stream =
                  (c_ret, List.rev(ret_stream))
     | Decl(_) -> let (c_ret, ret_stream) = cmp_decl c rt rem_stmt in
                  (c_ret, List.rev(ret_stream))
-    |_ -> failwith "cmp_stmt case not implemented"
+    | SCall(_) -> let (c_ret, ret_stream) = cmp_scall c rt rem_stmt in
+                 (c_ret, List.rev(ret_stream))
+    | If(_) -> let (c_ret, ret_stream) = cmp_if c rt rem_stmt in
+                 (c_ret, List.rev(ret_stream))
+    | For(_) ->  failwith "cmp_stmt For not implemented"
+    | While(_) -> let (c_ret, ret_stream) = cmp_while c rt rem_stmt in
+                 (c_ret, List.rev(ret_stream))
+    |_ -> failwith "cmp_stmt non matching case not implemented, should not be the case"
   end
 
 (* Compile a series of statements *)
@@ -464,7 +485,34 @@ and cmp_block (c:Ctxt.t) (rt:Ll.ty) (stmts:Ast.block) : Ctxt.t * stream =
       c, code >@ stmt_code
     ) (c,[]) stmts
 
+and cmp_while (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
+  (* create two labels, one for the while loop, the other for the exit *)
+  let while_label = gensym "while" in
+  let exit_label = gensym "exit" in
+  let While(exp_node, stmt_node_list) = stmt in
+  let (c1, b_ty, b_oper, b_stream) = cmp_exp c exp_node in
+  let check_insn = T(Ll.Cbr(b_oper, while_label, exit_label)) in
+  let (c2, while_stream) = cmp_block c1 (Ll.Void) stmt_node_list in
+  (c2, check_insn::(L(while_label))::[]@while_stream@[check_insn; L(exit_label)])
 
+and cmp_if (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
+  let If(exp_node, then_node_list, else_node_list) = stmt in
+  let then_label = gensym "then" in
+  let else_label = gensym "else" in
+  let exit_label = gensym "exit" in
+  let (c1, b_ty, b_oper, b_stream) = cmp_exp c exp_node in
+  let check_insn = T(Ll.Cbr(b_oper, then_label, else_label)) in
+  let last_insn = T(Ll.Br(exit_label)) in
+  let (c2, then_stream) = cmp_block c1 (Ll.Void) then_node_list in
+  let (c3, else_stream) = cmp_block c2 (Ll.Void) else_node_list in
+  (c3, b_stream@[check_insn; L(then_label)]@then_stream@[T(Ll.Br(exit_label));L(else_label)]@else_stream@[last_insn; L(exit_label)])
+
+(*  let lookup_function (id:Ast.id) (c:t) : Ll.ty * Ll.operand = *)
+and cmp_scall (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
+  let SCall(func_node, arg_node_list) = stmt in
+  let Id(func_name) = func_node.elt in
+  let (func_ty, func_oper) = Ctxt.lookup_function func_name c in
+  (c, [I(Call)])
 
 (* Adds each function identifer to the context at an
    appropriately translated type.  
@@ -493,10 +541,10 @@ let glb_ctxt_fold (c:Ctxt.t) (d:decl) : Ctxt.t =
       let g_exp = g_exp_node.elt in
       (match g_exp with
         | CNull rt -> Ctxt.add c g_name (cmp_rty rt, Gid g_name)
-        | CBool b -> Ctxt.add c g_name (cmp_ty Ast.TBool, Gid g_name)
-        | CInt i -> Ctxt.add c g_name (cmp_ty Ast.TInt, Gid g_name)
-        | CStr s -> Ctxt.add c g_name (cmp_rty Ast.RString, Gid g_name)
-        | CArr (t,e) -> Ctxt.add c g_name (cmp_rty (Ast.RArray t), Gid g_name)
+        | CBool b -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TBool), Gid g_name)
+        | CInt i -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TInt), Gid g_name)
+        | CStr s -> Ctxt.add c g_name (Ll.Ptr(cmp_rty Ast.RString), Gid g_name)
+        | CArr (t,e) -> failwith "glb_ctxt_fold CArr case not implemented"
         | _ -> failwith "g_exp case not implemented")
 
     | _ -> c
@@ -516,26 +564,8 @@ let cmp_global_ctxt (c:Ctxt.t) (p:Ast.prog) : Ctxt.t =
    4. Compile the body of the function using cmp_block
    5. Use cfg_of_stream to produce a LLVMlite cfg from 
  *)
-let alloca_args_fold (c:Ctxt.t) (acc : ((Ll.uid * Ll.insn) list) list) (arg : (Ast.ty * Ast.id)) : ((Ll.uid * Ll.insn) list) list =
-  match arg with
-    | (TBool, arg_id) -> 
-                          let alloca_id = (gensym arg_id) in
-                          let insn_alloca = (alloca_id, Alloca(cmp_ty TBool)) in
-                          let insn_transfer = (arg_id, Load(Ptr(cmp_ty TBool), Id(alloca_id)))in
-                          Ctxt.add c arg_id (Ptr(cmp_ty TBool), Ll.Id(alloca_id));
-                          [insn_alloca; insn_transfer]::acc
-    | (TInt, arg_id) -> 
-                          let alloca_id = (gensym arg_id) in
-                          let insn_alloca = (alloca_id, Alloca(cmp_ty TInt)) in
-                          let insn_transfer = (arg_id, Ll.Load(Ptr(cmp_ty TInt), Ll.Id(alloca_id))) in
-                          Ctxt.add c arg_id (Ptr(cmp_ty TBool), Ll.Id(alloca_id));
-                          [insn_alloca; insn_transfer]::acc
-    | _ -> failwith "alloca_args_fold case unimplemented"                                           
-
   
 
-let alloca_args (c:Ctxt.t) (args : (Ast.ty * Ast.id) list) : (Ll.uid * Ll.insn) list =
-  List.concat(List.rev(List.fold_left (alloca_args_fold c) [] args))
 
 let args_types_fold (c:Ctxt.t) (acc : Ll.ty list) (arg : (Ast.ty * Ast.id)) : Ll.ty list =
   begin match arg with
@@ -566,28 +596,41 @@ let is_decl (stmt:Ast.stmt) : bool =
   | Decl(_) -> true
   | _ -> false
 
-let rec decl_to_types (c:Ctxt.t) (decl_list : stmt list)  : (Ast.id * Ll.ty) list =
+let rec decl_to_vdecl  (decl_list : stmt list)  : Ast.vdecl list =
   match decl_list with
   | [] -> []
-  | x::xs -> let Decl(var_id, exp_node) = x in
-             (var_id, (exp_type c exp_node))::(decl_to_types c xs)
+  | Decl(x)::xs -> x::(decl_to_vdecl xs)
 
-let rec args_insns (c:Ctxt.t) (args_list : (Ast.id * Ll.ty) list) : Ctxt.t * (stream) =
-  match args_list with
+
+let rec decl_args (c:Ctxt.t) (decl_list : (Ast.id *( Ast.exp node)) list) : Ctxt.t * (stream) =
+  match decl_list with
   | [] -> (c,[])
-  | x::xs -> let (arg_id, arg_ll_ty) = x in
+  | x::xs -> let (arg_id, arg_exp_node) = x in
+             let arg_ll_ty = exp_type c arg_exp_node in
              let alloca_id = gensym arg_id in
              let alloca_insn = Ll.Alloca(arg_ll_ty) in
-             let (ret_c, ret_list) = args_insns c xs in
-             (Ctxt.add ret_c arg_id (Ll.Ptr(arg_ll_ty), Ll.Id(alloca_id)), E(alloca_id, alloca_insn)::ret_list)
+             let c1 = Ctxt.add c arg_id (Ll.Ptr(arg_ll_ty), Ll.Id(alloca_id)) in
+             let (ret_c, ret_list) = decl_args c1 xs in
+             (ret_c, E(alloca_id, alloca_insn)::ret_list)
 
 let local_vars (c:Ctxt.t) (stmt_node_list : stmt node list) : Ctxt.t * stream =
   let stmt_list = remove_nodes stmt_node_list in
   let decl_list = List.filter is_decl stmt_list in
-  let ids_with_ty = decl_to_types c decl_list in
-  args_insns c (ids_with_ty)
+  let vdecl_list = decl_to_vdecl decl_list in
+  decl_args c vdecl_list
   
-  
+
+let rec alloca_args (args_list : (Ast.ty * Ast.id) list) : Ctxt.t * stream =
+  begin match args_list with 
+  | [] -> ([],[])
+  | x::xs -> let (arg_ast_ty, arg_id) = x in
+             let arg_ll_ty = cmp_ty arg_ast_ty in
+             let alloca_id = gensym arg_id in
+             let ret_elt = E(alloca_id, Ll.Alloca(arg_ll_ty)) in
+             let ret_bnd = (arg_id, (arg_ll_ty, Ll.Id(alloca_id))) in
+             let (rec_ctxt, rec_stream) = alloca_args xs in
+             (ret_bnd::rec_ctxt, ret_elt::rec_stream)
+  end 
 
 
 
@@ -596,9 +639,11 @@ let cmp_fdecl (c:Ctxt.t) (f:Ast.fdecl node) : Ll.fdecl * (Ll.gid * Ll.gdecl) lis
   let fty_list = args_types c args in
   let ret_fty = (fty_list, (cmp_ret_ty frtyp)) in
   let ret_f_param = args_uids c args in
-  let (c1, vars_stream) = local_vars c body in
-  let (cmp_block_ctxt, cmp_block_stream) = cmp_block c1 (cmp_ret_ty frtyp) body in
-  let (ret_cfg, ret_gdecls) = cfg_of_stream (vars_stream@cmp_block_stream) in
+  let (args_ctxt, args_stream) = alloca_args args in
+  let c1 = args_ctxt@c in
+  let (c2, vars_stream) = local_vars c1 body in
+  let (cmp_block_ctxt, cmp_block_stream) = cmp_block c2 (cmp_ret_ty frtyp) body in
+  let (ret_cfg, ret_gdecls) = cfg_of_stream (args_stream@vars_stream@cmp_block_stream) in
   let ret_fdecl = {f_ty = ret_fty; f_param=ret_f_param; f_cfg=ret_cfg} in
   (ret_fdecl, ret_gdecls)
 
@@ -619,10 +664,10 @@ let rec cmp_gexp c (e:Ast.exp node) : Ll.gdecl * (Ll.gid * Ll.gdecl) list =
   begin match g_exp with
     | CBool b ->
                 let v = (if (b) then 1L else 0L) in
-                let g_dec = ((Ptr (cmp_ty TBool)),(GInt v)) in 
+                let g_dec = ((cmp_ty TBool),(GInt v)) in 
                 (g_dec, [])
     | CInt i ->
-                let g_dec = ((Ptr (cmp_ty TInt)),(GInt i)) in 
+                let g_dec = ( (cmp_ty TInt),(GInt i)) in 
                 (g_dec, [])
     | CStr s ->
                 let g_dec = (Ptr (cmp_rty RString),(GString s)) in 
