@@ -361,12 +361,18 @@ let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ctxt.t * Ll.ty * Ll.operand * st
     | CNull r -> failwith "cmp_exp null case not implemented"
     | Bop(_) -> cmp_exp_bop c rem_exp 
     | Uop(_) -> cmp_exp_uop c rem_exp
-    | Id(id) -> let (var_ty_ptr, var_ptr_oper) = Ctxt.lookup id c in
+    | Id(id) -> (let (var_ty_ptr, var_ptr_oper) = Ctxt.lookup id c in
                 let Ll.Ptr(var_ty) = var_ty_ptr in
-                let var_val_id = gensym "id" in
-                let c1 = Ctxt.add c var_val_id (var_ty, Ll.Id(var_val_id)) in
-                let insn = I(var_val_id, Load(Ll.Ptr(var_ty), var_ptr_oper)) in
-                (c1, var_ty, Ll.Id(var_val_id), [insn])
+                begin match var_ty with
+                  | Ll.Array(_, Ll.I8) -> (let gep_ptr = gensym "gep" in
+                                          let c1 = Ctxt.add c gep_ptr (Ll.Ptr(Ll.I8), Ll.Id(gep_ptr)) in
+                                          let gep_ins = I(gep_ptr, Ll.Gep(Ptr(var_ty), var_ptr_oper, [Ll.Const(0L); Ll.Const(0L)]))in
+                                          (c1, Ll.Ptr(Ll.I8), Ll.Id(gep_ptr), [gep_ins]))
+                  | _ ->  (let var_val_id = gensym "id" in
+                          let c1 = Ctxt.add c var_val_id (var_ty, Ll.Id(var_val_id)) in
+                          let insn = I(var_val_id, Load(Ll.Ptr(var_ty), var_ptr_oper)) in
+                          (c1, var_ty, Ll.Id(var_val_id), [insn]))
+                end)
     | Index(_) -> failwith "cmp_exp index not implemented"
     | Call(_) -> cmp_exp_call c rem_exp
     | _ -> failwith "cmp_exp case unimplemented"
@@ -523,8 +529,8 @@ and cmp_scall (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
   let Id(func_name) = func_node.elt in
   let (func_ty, func_oper) = Ctxt.lookup_function func_name c in
   let (c1,args_list, args_stream) = cmp_param c arg_node_list in
-
-  (c1, args_stream@[I("",Ll.Call (func_ty, func_oper, args_list))])
+  let void_arg = gensym "call" in
+  (c1, args_stream@[I(void_arg, Ll.Call (Ll.Void (* was func_ty*), func_oper, args_list))])
 
 (* Adds each function identifer to the context at an
    appropriately translated type.  
@@ -555,7 +561,7 @@ let glb_ctxt_fold (c:Ctxt.t) (d:decl) : Ctxt.t =
         | CNull rt -> Ctxt.add c g_name (cmp_rty rt, Gid g_name)
         | CBool b -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TBool), Gid g_name)
         | CInt i -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TInt), Gid g_name)
-        | CStr s -> Ctxt.add c g_name (Ll.Ptr(Ll.I8), Gid g_name)
+        | CStr s -> Ctxt.add c g_name (Ll.Ptr(Ll.Array(((String.length s) + 1), Ll.I8)), Gid g_name)
         | CArr (t,e) -> failwith "glb_ctxt_fold CArr case not implemented"
         | _ -> failwith "g_exp case not implemented")
 
@@ -681,8 +687,8 @@ let rec cmp_gexp c (e:Ast.exp node) : Ll.gdecl * (Ll.gid * Ll.gdecl) list =
     | CInt i ->
                 let g_dec = ( (cmp_ty TInt),(GInt i)) in 
                 (g_dec, [])
-    | CStr s ->
-                let g_dec = (Ll.Ptr(I8),(GString s)) in
+    | CStr s -> let str_length = (String.length s)+1 in
+                let g_dec = (Ll.Array(str_length,Ll.I8),GString s) in
                 (g_dec, [])
     | _ -> failwith "g_exp case not implemented"            
   end
