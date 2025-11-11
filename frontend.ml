@@ -368,9 +368,11 @@ let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ctxt.t * Ll.ty * Ll.operand * st
                 let insn = I(var_val_id, Load(Ll.Ptr(var_ty), var_ptr_oper)) in
                 (c1, var_ty, Ll.Id(var_val_id), [insn])
     | Index(_) -> failwith "cmp_exp index not implemented"
-    | Call(_) -> failwith "cmp_exp call not implemented"
+    | Call(_) -> cmp_exp_call c rem_exp
     | _ -> failwith "cmp_exp case unimplemented"
   end
+and cmp_exp_call (c:Ctxt.t) (exp:Ast.exp) : Ctxt.t * Ll.ty * Ll.operand * stream = failwith "cmp_exp call unimplemented"
+
 and cmp_exp_bop (c:Ctxt.t) (exp:Ast.exp) : Ctxt.t * Ll.ty * Ll.operand * stream =
   let Ast.Bop(op, exp1_node, exp2_node) = exp in
   let (exp1, exp2) = (exp1_node.elt, exp2_node.elt) in
@@ -457,6 +459,14 @@ let cmp_decl (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
 (* let rec cmp_exp (c:Ctxt.t) (exp:Ast.exp node) : Ctxt.t * Ll.ty * Ll.operand * stream = *)
 (* cmp_block (c:Ctxt.t) (rt:Ll.ty) (stmts:Ast.block) : Ctxt.t * stream = *)
 
+let rec cmp_param (c:Ctxt.t) (exp_node_list : exp node list) : (Ctxt.t)*((Ll.ty * Ll.operand) list)*stream =
+  begin match exp_node_list with
+  | [] -> (c,[], [])
+  | x::xs -> let arg_exp = x.elt in
+             let (c1, arg_ty, arg_oper, arg_stream) = cmp_exp c x in
+             let (rec_ctxt, rec_list, rec_stream) = cmp_param c1 xs in
+             (rec_ctxt, (arg_ty, arg_oper)::rec_list, arg_stream@rec_stream)
+  end
 
   
 let rec cmp_stmt (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt node) : Ctxt.t * stream =
@@ -512,7 +522,9 @@ and cmp_scall (c:Ctxt.t) (rt:Ll.ty) (stmt:Ast.stmt) : Ctxt.t * stream =
   let SCall(func_node, arg_node_list) = stmt in
   let Id(func_name) = func_node.elt in
   let (func_ty, func_oper) = Ctxt.lookup_function func_name c in
-  (c, [I(Call)])
+  let (c1,args_list, args_stream) = cmp_param c arg_node_list in
+
+  (c1, args_stream@[I("",Ll.Call (func_ty, func_oper, args_list))])
 
 (* Adds each function identifer to the context at an
    appropriately translated type.  
@@ -543,7 +555,7 @@ let glb_ctxt_fold (c:Ctxt.t) (d:decl) : Ctxt.t =
         | CNull rt -> Ctxt.add c g_name (cmp_rty rt, Gid g_name)
         | CBool b -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TBool), Gid g_name)
         | CInt i -> Ctxt.add c g_name (Ll.Ptr(cmp_ty Ast.TInt), Gid g_name)
-        | CStr s -> Ctxt.add c g_name (Ll.Ptr(cmp_rty Ast.RString), Gid g_name)
+        | CStr s -> Ctxt.add c g_name (Ll.Ptr(Ll.I8), Gid g_name)
         | CArr (t,e) -> failwith "glb_ctxt_fold CArr case not implemented"
         | _ -> failwith "g_exp case not implemented")
 
@@ -670,7 +682,7 @@ let rec cmp_gexp c (e:Ast.exp node) : Ll.gdecl * (Ll.gid * Ll.gdecl) list =
                 let g_dec = ( (cmp_ty TInt),(GInt i)) in 
                 (g_dec, [])
     | CStr s ->
-                let g_dec = (Ptr (cmp_rty RString),(GString s)) in 
+                let g_dec = (Ll.Ptr(I8),(GString s)) in
                 (g_dec, [])
     | _ -> failwith "g_exp case not implemented"            
   end
